@@ -1,77 +1,113 @@
+/* ============================================================
+   DESAFIO SQL – VIEWS, PERMISSÕES E TRIGGERS
+   Banco de dados: e-commerce (clientes, pedidos, produtos)
+   SGBD: PostgreSQL
+   ============================================================ */
 
--- “Número de empregados por departamento”
-CREATE VIEW vw_pedidos_por_cliente AS
-SELECT c.id_cliente,
-       c.nome,
-       COUNT(p.id_pedido) AS total_pedidos
+---------------------------------------------------------------
+-- PARTE 1 – CRIAÇÃO DE VIEWS
+---------------------------------------------------------------
+
+/*
+ VIEW 1
+ Total de pedidos por cliente
+ (adaptado ao contexto e-commerce)
+*/
+CREATE OR REPLACE VIEW vw_total_pedidos_cliente AS
+SELECT
+    c.id_cliente,
+    c.nome,
+    COUNT(p.id_pedido) AS total_pedidos
 FROM clientes c
 LEFT JOIN pedidos p ON p.id_cliente = c.id_cliente
 GROUP BY c.id_cliente, c.nome;
 
--- “Lista de departamentos e seus gerentes”
-CREATE VIEW vw_clientes_ativos AS
-SELECT c.id_cliente,
-       c.nome,
-       COUNT(p.id_pedido) AS total_pedidos
-FROM clientes c
-JOIN pedidos p ON p.id_cliente = c.id_cliente
-GROUP BY c.id_cliente, c.nome;
 
--- Projetos com maior número de empregados
-CREATE VIEW vw_produtos_mais_vendidos AS
-SELECT pr.id_produto,
-       pr.nome,
-       SUM(ip.quantidade) AS total_vendido
+/*
+ VIEW 2
+ Lista de clientes e seus pedidos
+*/
+CREATE OR REPLACE VIEW vw_clientes_pedidos AS
+SELECT
+    c.nome AS cliente,
+    p.id_pedido,
+    p.data_pedido
+FROM clientes c
+JOIN pedidos p ON p.id_cliente = c.id_cliente;
+
+
+/*
+ VIEW 3
+ Produtos mais vendidos (ordenado por quantidade DESC)
+*/
+CREATE OR REPLACE VIEW vw_produtos_mais_vendidos AS
+SELECT
+    pr.id_produto,
+    pr.nome,
+    SUM(ip.quantidade) AS total_vendido
 FROM produtos pr
 JOIN itens_pedido ip ON ip.id_produto = pr.id_produto
 GROUP BY pr.id_produto, pr.nome
 ORDER BY total_vendido DESC;
 
--- Lista de projetos, departamentos e gerentes
-CREATE VIEW vw_produtos_pedidos_clientes AS
-SELECT pr.nome AS produto,
-       p.id_pedido,
-       c.nome AS cliente
-FROM itens_pedido ip
-JOIN produtos pr ON pr.id_produto = ip.id_produto
-JOIN pedidos p ON p.id_pedido = ip.id_pedido
-JOIN clientes c ON c.id_cliente = p.id_cliente;
 
--- Empregados com dependentes e se são gerentes
-CREATE VIEW vw_clientes_multiplos_pedidos AS
-SELECT c.nome,
-       COUNT(p.id_pedido) AS total_pedidos,
-       CASE
-           WHEN COUNT(p.id_pedido) > 1 THEN 'SIM'
-           ELSE 'NAO'
-       END AS cliente_frequente
-FROM clientes c
-JOIN pedidos p ON p.id_cliente = c.id_cliente
-GROUP BY c.nome;
+/*
+ VIEW 4
+ Detalhes completos dos pedidos
+*/
+CREATE OR REPLACE VIEW vw_detalhes_pedido AS
+SELECT
+    p.id_pedido,
+    c.nome AS cliente,
+    pr.nome AS produto,
+    ip.quantidade,
+    pr.preco,
+    (ip.quantidade * pr.preco) AS valor_total
+FROM pedidos p
+JOIN clientes c ON c.id_cliente = p.id_cliente
+JOIN itens_pedido ip ON ip.id_pedido = p.id_pedido
+JOIN produtos pr ON pr.id_produto = ip.id_produto;
 
--- PERMISSÕES DE USUÁRIOS
-CREATE USER usuario_gerente WITH PASSWORD 'gerente123';
-CREATE USER usuario_cliente WITH PASSWORD 'cliente123';
 
-GRANT SELECT ON
-    vw_pedidos_por_cliente,
-    vw_clientes_ativos,
-    vw_produtos_mais_vendidos,
-    vw_produtos_pedidos_clientes,
-    vw_clientes_multiplos_pedidos
-TO usuario_gerente;
+---------------------------------------------------------------
+-- PARTE 1.1 – CONTROLE DE ACESSO (USUÁRIOS E PERMISSÕES)
+---------------------------------------------------------------
 
-GRANT SELECT ON vw_produtos_mais_vendidos TO usuario_cliente;
+/*
+ Usuário gerente: acesso às views
+*/
+CREATE USER gerente WITH PASSWORD 'gerente123';
 
-CREATE TABLE clientes_backup (
+/*
+ Usuário cliente: acesso limitado
+*/
+CREATE USER cliente_app WITH PASSWORD 'cliente123';
+
+/* Permissões */
+GRANT SELECT ON vw_total_pedidos_cliente TO gerente;
+GRANT SELECT ON vw_clientes_pedidos TO gerente;
+GRANT SELECT ON vw_produtos_mais_vendidos TO gerente;
+GRANT SELECT ON vw_detalhes_pedido TO gerente;
+
+GRANT SELECT ON vw_clientes_pedidos TO cliente_app;
+
+
+---------------------------------------------------------------
+-- PARTE 2 – TRIGGERS
+---------------------------------------------------------------
+
+/*
+ TRIGGER 1
+ BEFORE DELETE – Backup de clientes excluídos
+*/
+CREATE TABLE IF NOT EXISTS clientes_backup (
     id_cliente INT,
     nome VARCHAR(100),
     email VARCHAR(100),
-    data_remocao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    data_exclusao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-
-CREATE OR REPLACE FUNCTION fn_backup_cliente()
+CREATE OR REPLACE FUNCTION backup_cliente()
 RETURNS TRIGGER AS $$
 BEGIN
     INSERT INTO clientes_backup (id_cliente, nome, email)
@@ -84,57 +120,66 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_backup_cliente
 BEFORE DELETE ON clientes
 FOR EACH ROW
-EXECUTE FUNCTION fn_backup_cliente();
+EXECUTE FUNCTION backup_cliente();
 
 
-CREATE TABLE pedidos_historico (
-    id_pedido INT,
-    data_antiga DATE,
-    data_nova DATE,
-    data_alteracao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE OR REPLACE FUNCTION fn_historico_pedido()
+/*
+ TRIGGER 2
+ BEFORE INSERT – Impedir quantidade inválida em itens do pedido
+*/
+CREATE OR REPLACE FUNCTION validar_quantidade_item()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO pedidos_historico (id_pedido, data_antiga, data_nova)
-    VALUES (OLD.id_pedido, OLD.data_pedido, NEW.data_pedido);
+    IF NEW.quantidade <= 0 THEN
+        RAISE EXCEPTION 'Quantidade deve ser maior que zero';
+    END IF;
 
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_historico_pedido
-BEFORE UPDATE ON pedidos
+CREATE TRIGGER trg_validar_quantidade
+BEFORE INSERT ON itens_pedido
 FOR EACH ROW
-EXECUTE FUNCTION fn_historico_pedido();
-
---testando views e triggers
-
-INSERT INTO clientes (nome, email)
-VALUES ('Robson', 'rob@email.com');
-
-INSERT INTO produtos (nome, preco)
-VALUES ('Teclado Mecânico', 350.00);
-
-INSERT INTO pedidos (id_cliente, data_pedido)
-VALUES (1, CURRENT_DATE);
-
-INSERT INTO itens_pedido (id_pedido, id_produto, quantidade)
-VALUES (5, 1, 0);
+EXECUTE FUNCTION validar_quantidade_item();
 
 
-UPDATE itens_pedido
-SET quantidade = quantidade + 2
-WHERE id_pedido = 1
-  AND id_produto = 1;
 /*
-INSERT INTO itens_pedido (id_pedido, id_produto, quantidade)
-VALUES (1, 1, 2);
-
-SELECT * FROM vw_resumo_pedidos;
-
-
-SELECT *
-FROM pedidos
+ TRIGGER 3
+ BEFORE INSERT – Soma quantidade se produto já existir no pedido
 */
+CREATE OR REPLACE FUNCTION somar_quantidade_item()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM itens_pedido
+        WHERE id_pedido = NEW.id_pedido
+          AND id_produto = NEW.id_produto
+    ) THEN
+        UPDATE itens_pedido
+        SET quantidade = quantidade + NEW.quantidade
+        WHERE id_pedido = NEW.id_pedido
+          AND id_produto = NEW.id_produto;
+
+        RETURN NULL;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_somar_quantidade
+BEFORE INSERT ON itens_pedido
+FOR EACH ROW
+EXECUTE FUNCTION somar_quantidade_item();
+
+
+---------------------------------------------------------------
+-- TESTES (OPCIONAL PARA VALIDAÇÃO)
+---------------------------------------------------------------
+
+-- SELECT * FROM vw_total_pedidos_cliente;
+-- SELECT * FROM vw_produtos_mais_vendidos;
+-- DELETE FROM clientes WHERE id_cliente = 1;
+-- INSERT INTO itens_pedido (id_pedido, id_produto, quantidade) VALUES (1, 1, 2);
